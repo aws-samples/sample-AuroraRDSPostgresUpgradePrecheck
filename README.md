@@ -91,7 +91,8 @@ We welcome contributions and feedback to improve this tool. Please submit issues
 ## Authors and Acknowledgment
 
 - Author: Vivek Singh
-- Contributors: Please see the GitHub repository for a list of contributors
+- Contributors:Jonathan Klobucnik, Prashob Krishnan, Jigar Mandli, Rob Kiolbasa
+- Reviewers: Umamaheswari Elangovan, Kanhaiya Lal, Deepak Sharma
 
 ## License
 
