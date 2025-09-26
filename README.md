@@ -15,7 +15,7 @@ Database upgrades require careful planning and can involve application downtime.
 
 ## About the Tool
 
-This pre-upgrade check tool is written in bash and supports PostgreSQL versions 10-14. It executes AWS CLI commands and SQL queries to check for common upgrade blockers, including:
+This pre-upgrade check tool is written in bash and supports PostgreSQL versions 12 and older. It executes AWS CLI commands and SQL queries to check for common upgrade blockers, including:
 
 - Target PostgreSQL version compatibility
 - Unsupported DB instance classes
