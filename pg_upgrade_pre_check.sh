@@ -4,13 +4,13 @@
 #2. Copy script on Amazon EC2 Linux instance with AWS CLI configured, and psql client installed with accessibility to RDS/Aurora Postgres instance
 #3. Make script executable: chmod +x pg_upgrade_pre_check.sh
 #4. Run the script: ./pg_upgrade_pre_check.sh
-#5. Use the RDS PostgreSQL or Aurora PostgreSQL Cluster endpoint URL for connection
+#5. Use the RDS PostgreSQL or Aurora PostgreSQL Writer instance endpoint URL for connection
 #6. The database user should have READ access on all of the tables to get better metrics
 #7. It will take around 2-3 mins to run (depending on size of instance), and generate html report:  <CompanyName>_<DatabaseIdentifier>_pre-upgrade-check_report_<date>.html
 #8. Share the report with your AWS resource for dive deep session
 #################
-# Author: Vivek Singh, Sr. Postgres Specialist Technical Account Manager, AWS
-# V03 : MAY12 2023
+# Author: Vivek Singh, Principal Postgres Specialist Technical Account Manager, AWS
+# V04 : OCT07 2025
 #################
 clear
 echo -n -e "RDS PostgreSQL instance endpoint URL or Aurora PostgreSQL Cluster endpoint URL: "
@@ -160,6 +160,23 @@ FROM pg_attribute
   join pg_namespace on relnamespace=pg_namespace.oid
 WHERE atttypid::regtype::text like '%sql_identifier'
   and nspname!='information_schema';"
+  
+#GIST index count
+SQL17="SELECT COUNT(*) FROM pg_index i
+             JOIN pg_class c ON i.indexrelid = c.oid
+             JOIN pg_namespace n ON c.relnamespace = n.oid
+             JOIN pg_am am ON c.relam = am.oid
+             WHERE am.amname = 'gist'
+             AND n.nspname NOT IN ('pg_catalog', 'information_schema');"
+			 
+#GIST index list 
+SQL18="SELECT n.nspname as schema_name, c.relname as index_name
+           FROM pg_index i
+           JOIN pg_class c ON i.indexrelid = c.oid
+           JOIN pg_namespace n ON c.relnamespace = n.oid
+           JOIN pg_am am ON c.relam = am.oid
+           WHERE am.amname = 'gist'
+           AND n.nspname NOT IN ('pg_catalog', 'information_schema');"
 
 sleep 1
 echo "still working ..."
@@ -181,7 +198,7 @@ echo "<body style="font-family:'Verdana'" bgcolor="#F8F8F8">" >> $html
 echo "<fieldset>" >> $html
 echo "<table><tr> <td width="20"></td> <td>" >>$html
 echo "<h1><font face="verdana" color="#0099cc"><center><u>PostgreSQL Pre-upgrade Check Report For $COMNAME</u></center></font></h1></color>" >> $html
-echo "<font face="verdana" color="#808080"><small>Author: Vivek Singh, Sr. Database Specialist - PostgreSQL, Amazon Web Servies | Version V01</small></font>" >> $html
+echo "<font face="verdana" color="#808080"><small>Author: Vivek Singh, Principal Database Specialist - PostgreSQL, Amazon Web Servies | Version V04</small></font>" >> $html
 echo "</fieldset>" >> $html
 echo "<br>" >> $html
 echo "<br>" >> $html
@@ -493,7 +510,7 @@ EXTNSI=`PGPASSWORD=$MYPASS $PSQLCL -c "SET statement_timeout='60s' ; SET idle_in
 
 if [[ $EXTNSI  -eq  0 ]]
 then
-echo "<font face="verdana" color="green">Your installation doesn't contain the 'sql_identifier' data type in user tables and/or indexes. No issue found.</font>" >>$html
+echo "<font face="verdana" color="green">Your database doesn't contain the 'sql_identifier' data type in user tables and/or indexes. No issue found.</font>" >>$html
 else
 echo "<font face="verdana" color="red">$EXTNSI 'sql_identifier' data type  columns found. Your installation contains the "sql_identifier" data type in user tables and/or indexes.  The on-disk format for this data type has changed, so this cluster cannot currently be upgraded.  You can remove the problem tables or change the data type to "name" and restart the upgrade.Use command: ALTER TABLE table_name ALTER COLUMN column_name TYPE name;.</font>" >>$html
 echo "`PGPASSWORD=$MYPASS $PSQLCL --html -c "SET statement_timeout='60s' ; SET idle_in_transaction_session_timeout='60s';
@@ -531,8 +548,115 @@ fi
 echo "<br>" >> $html
 echo "<br>" >> $html
 
+#GIST index check
+echo "<font face="verdana" color="#ff6600">15. Check for GIST index: </font>" >>$html
+echo "<br>" >> $html
+
+GISTCOUNT=`PGPASSWORD=$MYPASS $PSQLCL -c "SET statement_timeout='60s' ; SET idle_in_transaction_session_timeout='60s'; $SQL17" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g'`
+
+if [[ $GISTCOUNT  -eq  0 ]]
+then
+echo "<font face="verdana" color="green">No GIST indexes found. PostgreSQL 16 changes how GIST indexes handle null values. No action needed.</font>" >>$html
+else
+echo "<font face="verdana" color="red">$GISTCOUNT GIST indexes found. PostgreSQL 16 changes how GIST indexes handle null values. Consider REINDEX after upgrade for optimal performance. Below is the list of GIST indexes:</font>" >>$html
+echo "`PGPASSWORD=$MYPASS $PSQLCL --html -c "SET statement_timeout='60s' ; SET idle_in_transaction_session_timeout='60s';
+$SQL18
+"|sed '$d'|sed '$d' ` " >>$html
+fi
+
+echo "<br>" >> $html
+echo "<br>" >> $html
+
+# Add ICU Collation check for PostgreSQL 16+
+echo "<font face="verdana" color="#ff6600">16. Check for ICU Collations (PostgreSQL 16+): </font>" >>$html
+echo "<br>" >> $html
+
+if [ "$TDBVER" == "16" ] || [ "$TDBVER" == "17" ]
+then
+  # SQL to check for ICU collations
+  ICUSQL="SELECT collname, collprovider 
+          FROM pg_collation 
+          WHERE collprovider = 'i' 
+          AND collname NOT LIKE 'default%' limit 10;"
+          
+  ICUCOUNT=`PGPASSWORD=$MYPASS $PSQLCL -c "SET statement_timeout='60s'; SET idle_in_transaction_session_timeout='60s'; 
+            SELECT COUNT(*) FROM pg_collation 
+            WHERE collprovider = 'i' 
+            AND collname NOT LIKE 'default%';" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g'`
+            
+  if [ "$ICUCOUNT" -eq "0" ]
+  then
+    echo "<font face="verdana" color="green">No custom ICU collations found. PostgreSQL 16 has stricter requirements for ICU collation versions. No action needed.</font>" >> $html
+  else
+    echo "<font face="verdana" color="orange">$ICUCOUNT custom ICU collations found. PostgreSQL 16 has stricter requirements for ICU collation versions. These collations may need to be recreated after upgrade. A few ICU collations are below: </font>" >> $html
+    echo "`PGPASSWORD=$MYPASS $PSQLCL --html -c "SET statement_timeout='60s'; SET idle_in_transaction_session_timeout='60s'; $ICUSQL"|sed '$d'|sed '$d' ` " >>$html
+  fi
+  echo "<br>" >> $html
+  echo "<br>" >> $html
+fi
+
+# Add check for new reserved keywords in PostgreSQL 17
+if [ "$TDBVER" == "17" ]
+then
+  echo "<font face="verdana" color="#ff6600">18. Check for new reserved keywords (PostgreSQL 17): </font>" >>$html
+  echo "<br>" >> $html
+  
+  # SQL to check for objects using names that will become reserved in PG17
+  # This is a placeholder - update with actual PG17 reserved words when available
+  PG17KEYWORDS="'checkpoint', 'subscription', 'publication'"
+  
+  KEYWORDSQL="SELECT n.nspname as schema_name, c.relname as object_name, 
+              CASE c.relkind 
+                WHEN 'r' THEN 'table' 
+                WHEN 'v' THEN 'view' 
+                WHEN 'i' THEN 'index' 
+                WHEN 'S' THEN 'sequence' 
+                WHEN 'm' THEN 'materialized view' 
+              END as object_type
+              FROM pg_class c
+              JOIN pg_namespace n ON c.relnamespace = n.oid
+              WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+              AND lower(c.relname) IN ($PG17KEYWORDS);"
+              
+  KEYWORDCOUNT=`PGPASSWORD=$MYPASS $PSQLCL -c "SET statement_timeout='60s'; SET idle_in_transaction_session_timeout='60s'; 
+                SELECT COUNT(*) FROM pg_class c
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+                AND lower(c.relname) IN ($PG17KEYWORDS);" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g'`
+                
+  if [ "$KEYWORDCOUNT" -eq "0" ]
+  then
+    echo "<font face="verdana" color="green">No objects found using names that will become reserved keywords in PostgreSQL 17. No action needed.</font>" >> $html
+  else
+    echo "<font face="verdana" color="orange">$KEYWORDCOUNT objects found using names that will become reserved keywords in PostgreSQL 17. Consider renaming these objects before upgrading.</font>" >> $html
+    echo "`PGPASSWORD=$MYPASS $PSQLCL --html -c "SET statement_timeout='60s'; SET idle_in_transaction_session_timeout='60s'; $KEYWORDSQL"|sed '$d'|sed '$d' ` " >>$html
+  fi
+  echo "<br>" >> $html
+  echo "<br>" >> $html
+fi
+
+# Check for template1 database connection settings
+
+echo "<font face="verdana" color="#ff6600">19. Check template1 database connection settings: </font>" >>$html
+echo "<br>" >> $html
+
+# Check if template1 allows connections
+TEMPLATE1_CONN=$(PGPASSWORD=$MYPASS $PSQLCL -c "SELECT datallowconn FROM pg_database WHERE datname='template1';" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g')
+
+if [ "$TEMPLATE1_CONN" = "t" ] || [ "$TEMPLATE1_CONN" = "true" ]
+then
+  echo "<font face="verdana" color="green">The template1 database allows connections. No issue found.</font>" >> $html
+else
+  echo "<font face="verdana" color="red">The template1 database does not allow connections. This can cause upgrade failures. Before upgrading, run the following command to allow connections:</font>" >> $html
+  echo "<br>" >> $html
+  echo "<font face="Courier New" color="#0099cc">psql -h $EP -p $RDSPORT -U $MASTERUSER -c \"ALTER DATABASE template1 WITH ALLOW_CONNECTIONS = true;\"</font>" >> $html
+fi
+  echo "<br>" >> $html
+  echo "<br>" >> $html
+
+
 #Maintenance task check
-echo "<font face="verdana" color="#ff6600">15. Check for maintenance task: </font>" >>$html
+echo "<font face="verdana" color="#ff6600">20. Check for maintenance task: </font>" >>$html
 echo "<br>" >> $html
 echo "<font face="verdana" color="orange">Pending maintenance tasks may increase downtime during upgrade or fail upgrade. Please use below AWS CLI command to find and apply RDS maintenance tasks.</font>" >>$html
 echo "<br>" >> $html
@@ -561,7 +685,7 @@ echo "<br>" >> $html
 echo "<font face="verdana" color="#0099cc"><small>Note: While modifying any database configuration, parameters, please consult/review with your DBA/DB expert. Results may vary depending on the workloads and expectations. Also, before applying modifications, learn about them at <a href="https://www.postgresql.org/docs/current/pgstatstatements.html" target="_blank">PostgreSQL official docs</a>. Before making any changes in production, its recommended to test those in testing environment thoroughly. If you have any feedback about this tool, please provide it to your AWS representative.<small></font>" >> $html
 
 echo "<br>" >> $html
-echo "<font face="verdana" color="#d3d3d3"><small>End of report. Script version V03</small></font>" >> $html
+echo "<font face="verdana" color="#d3d3d3"><small>End of report. Script version V04</small></font>" >> $html
 echo "<br>" >> $html
 echo "<br>" >> $html
 
@@ -569,5 +693,3 @@ echo "</td></tr></table></body></html>" >> $html
 
 sleep 1
 echo "Report `pwd`/$html created!"
-
-
