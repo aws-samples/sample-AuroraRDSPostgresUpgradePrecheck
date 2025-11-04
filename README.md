@@ -31,6 +31,10 @@ This pre-upgrade check tool is written in bash and supports PostgreSQL versions 
 - SQL_identifier data type usage
 - Views dependency problems
 - Database user configuration
+- GIST indexes
+- ICU Collations
+- Reserved keywords
+- Templete1 database connection settings
 - Maintenance tasks
 
 The tool also provides recommendations for fixing identified issues and references to AWS documentation for best practices.
