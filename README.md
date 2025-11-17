@@ -39,6 +39,21 @@ This pre-upgrade check tool is written in bash and supports PostgreSQL versions 
 
 The tool also provides recommendations for fixing identified issues and references to AWS documentation for best practices.
 
+#Version History:
+- V05 (NOV 2025):
+  - Added support for IAM authentication for Aurora and RDS PostgreSQL
+  - Added cross-region support
+  - Enhanced SSL certificate handling
+  - Added custom port support
+  - Fixed Aurora Serverless v2 compatibility issues
+  - Improved shared_buffers calculation for Aurora
+- V04 
+ - Added 5 more checks
+ - Supported instance class updated
+- V03
+  - Support for RDS PostgreSQL added
+
+
 ## Limitations
 
 - The current version runs checks only on the connected database
