@@ -73,7 +73,7 @@ Steps:
 2. Make the script executable: `chmod +x pg_upgrade_pre_check.sh`
 3. Run the script: `./pg_upgrade_pre_check.sh`
 4. Provide the requested information:
-   - RDS/Aurora PostgreSQL endpoint URL
+   - RDS PostgreSQL endpoint URL or Aurora PostgreSQL Cluster endpoint URL
    - Database name
    - Port
    - Database username
