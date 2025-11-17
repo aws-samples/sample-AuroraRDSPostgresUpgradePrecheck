@@ -47,12 +47,11 @@ Version History:
   - Added custom port support
   - Fixed Aurora Serverless v2 compatibility issues
   - Improved shared_buffers calculation for Aurora
-- V04 
- - Added 5 more checks
- - Supported instance class updated
-- V03
-  - Support for RDS PostgreSQL added
-
+- V04 (JUL 2025):
+  - Added 5 more checks
+  - Supported instance class updated
+- V03 (OCT 2024):
+  - Support to RDS PostgreSQL added
 
 ## Limitations
 
