@@ -39,7 +39,7 @@ This pre-upgrade check tool is written in bash and supports PostgreSQL versions 
 
 The tool also provides recommendations for fixing identified issues and references to AWS documentation for best practices.
 
-#Version History:
+Version History:
 - V05 (NOV 2025):
   - Added support for IAM authentication for Aurora and RDS PostgreSQL
   - Added cross-region support
