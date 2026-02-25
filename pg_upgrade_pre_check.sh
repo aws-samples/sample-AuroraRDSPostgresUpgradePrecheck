@@ -450,7 +450,7 @@ if [ $WORKMEMVAL  -eq  4096 ]
 then
 echo "<font face="verdana" color="green">Work_mem is set at default value 4MB. Higher value of work_mem can cause 'Incompatible Parameters' issue and might fail upgrade. No issues found.</font>" >>$html
 else
-echo "<font face="verdana" color="red">Value of work_memory is found modified to $WORKMEMVAL. Higher value of work_mem can cause 'Incompatible Parameters' issue and might fail upgrade. Set it to default 4MB to avoid upgrade failures.</font>" >>$html
+echo "<font face="verdana" color="red">Value of work_mem is found modified to $WORKMEMVAL. Higher value of work_mem can cause 'Incompatible Parameters' issue and might fail upgrade. Set it to default 4MB to avoid upgrade failures.</font>" >>$html
 fi
 echo "<br>" >> $html
 
@@ -724,4 +724,5 @@ echo "</td></tr></table></body></html>" >> $html
 
 sleep 1
 echo "Report `pwd`/$html created!"
+
 
