@@ -182,6 +182,11 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO mcp_readonly
 | Scope | DBA diagnostics | General database access |
 | Risk | Minimal (can't run arbitrary SQL) | Higher (AI could run expensive queries) |
 
+## Contributors and Contributing
+
+- See [component contributors](CONTRIBUTORS.md) for authorship and attribution.
+- See the repository [contribution guidelines](../CONTRIBUTING.md) to report issues or propose changes.
+
 ## Disclaimer
 
 This is sample code, not intended for production use without additional review and testing. Validate in a non-production environment first.

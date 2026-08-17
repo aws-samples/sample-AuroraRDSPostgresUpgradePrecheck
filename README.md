@@ -6,6 +6,12 @@ A collection of diagnostic scripts for Amazon RDS for PostgreSQL and Amazon Auro
 
 ## Tools
 
+Each component has its own documentation and attribution page:
+
+- [PostgreSQL Health Check](health-check/README.md)
+- [PostgreSQL Pre-Upgrade Check](pre-upgrade-check/README.md)
+- [PostgreSQL DBA MCP Server](postgres-mcp-server/README.md)
+
 ### 1. PostgreSQL Health Check (`health-check/`)
 
 A comprehensive health check script that generates an HTML report covering 20+ diagnostic areas.
