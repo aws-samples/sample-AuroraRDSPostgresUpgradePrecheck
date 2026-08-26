@@ -74,6 +74,7 @@ Validates readiness for PostgreSQL major version upgrades by checking for known 
 - Storage capacity
 - Read replica configuration
 - Views dependent on system catalogs
+- PostgreSQL 19 TLS client readiness (non-blocking warning)
 
 **How to run:**
 ```bash

@@ -10,6 +10,13 @@
 #8. Share the report with your AWS resource for dive deep session
 #################
 # Author: Vivek Singh, Principal Postgres Specialist Technical Account Manager, AWS
+# V06 : AUG25 2026
+# Changes in V06:
+# - Added non-blocking PostgreSQL 19 TLS client-readiness assessment
+# - Added pg_stat_ssl protocol observations and SSL protocol parameter checks
+# - Added representative-traffic, clone/test, and proxy visibility limitations
+# - Added optional SSM tunnel connection host/port overrides
+# - Added GNU/Linux and macOS UTC date compatibility
 # V05 : NOV13 2025
 # Changes in V05:
 # - Added support for IAM authentication
@@ -25,12 +32,33 @@ read EP
 # Extract instance and region information
 RDSNAME="${EP%%.*}"
 REGNAME=`echo "$EP" | cut -d. -f3`
-START=$(date -u -d '5 minutes ago' "+%Y-%m-%dT%H:%M:%SZ")
+if date -u -d '5 minutes ago' "+%Y-%m-%dT%H:%M:%SZ" >/dev/null 2>&1
+then
+    START=$(date -u -d '5 minutes ago' "+%Y-%m-%dT%H:%M:%SZ")
+else
+    START=$(date -u -v-5M "+%Y-%m-%dT%H:%M:%SZ")
+fi
 END=$(date -u "+%Y-%m-%dT%H:%M:%SZ")
 
 echo -n -e "Port (default: 5432): "
 read RDSPORT
 RDSPORT=${RDSPORT:-5432}
+
+# Optional local tunnel route. EP and RDSPORT remain the real RDS/Aurora
+# endpoint and port for AWS metadata and IAM token generation. PostgreSQL
+# connections use these overrides only when explicitly supplied.
+DB_CONNECT_HOST=${PG_TUNNEL_HOST:-$EP}
+DB_CONNECT_PORT=${PG_TUNNEL_PORT:-$RDSPORT}
+DB_PSQL_HOST=$EP
+if [ "$DB_CONNECT_HOST" != "$EP" ] || [ "$DB_CONNECT_PORT" != "$RDSPORT" ]
+then
+    # Keep the real endpoint as libpq host for TLS SNI/hostname verification,
+    # but route the socket through the local tunnel address.
+    export PGHOSTADDR=$DB_CONNECT_HOST
+    echo "Using PostgreSQL tunnel at $DB_CONNECT_HOST:$DB_CONNECT_PORT for $EP:$RDSPORT"
+else
+    unset PGHOSTADDR
+fi
 
 echo -n -e "Database Name: "
 read DBNAME
@@ -50,7 +78,7 @@ case $AUTH_CHOICE in
         read -s MYPASS
         echo ""
         export PGPASSWORD=$MYPASS
-        PSQLCL="psql -h $EP -p $RDSPORT -U $MASTERUSER -d $DBNAME"
+        PSQLCL="psql -h $DB_PSQL_HOST -p $DB_CONNECT_PORT -U $MASTERUSER -d $DBNAME"
         ;;
     2)
         # Check if IAM authentication is enabled
@@ -100,7 +128,9 @@ case $AUTH_CHOICE in
             exit 1
         fi
         export PGPASSWORD=$TOKEN
-        PSQLCL="psql -h $EP -p $RDSPORT -U $MASTERUSER -d $DBNAME -v sslmode=verify-full -v sslrootcert=$REGNAME-bundle.pem"
+        export PGSSLMODE=verify-full
+        export PGSSLROOTCERT=$REGNAME-bundle.pem
+        PSQLCL="psql -h $DB_PSQL_HOST -p $DB_CONNECT_PORT -U $MASTERUSER -d $DBNAME"
         ;;
     *)
         echo "Invalid choice. Please enter 1 for Password or 2 for IAM authentication."
@@ -111,6 +141,11 @@ esac
 echo -n -e "Target Postgres version: "
 
 read TDBVER
+if ! [[ "$TDBVER" =~ ^[0-9]+([.][0-9]+)*$ ]]
+then
+    echo "Invalid target PostgreSQL version '$TDBVER'. Enter a numeric major or release version such as 19 or 19.1."
+    exit 1
+fi
 echo -n -e "Company Name (with no space): "
 read COMNAME
 
@@ -273,6 +308,52 @@ SQL18="SELECT n.nspname as schema_name, c.relname as index_name
            WHERE am.amname = 'gist'
            AND n.nspname NOT IN ('pg_catalog', 'information_schema');"
 
+# PostgreSQL 19 TLS client-readiness snapshot. pg_stat_ssl covers all
+# databases on the connected PostgreSQL instance, but it does not combine
+# activity from other Aurora writer/reader instances. The diagnostic session,
+# PostgreSQL background workers, and AWS-managed service users are excluded from
+# candidate client counts. RDS Proxy database-facing backends are counted
+# separately because they do not prove client-to-proxy TLS compatibility.
+# Results are aggregate-only and expose no client identifiers.
+SQL19="WITH client_sessions AS (
+  SELECT a.usename, s.ssl, s.version
+  FROM pg_catalog.pg_stat_activity a
+  LEFT JOIN pg_catalog.pg_stat_ssl s ON s.pid = a.pid
+  WHERE a.backend_type = 'client backend'
+    AND a.pid <> pg_backend_pid()
+    AND COALESCE(a.usename, '') <> 'rdsadmin'
+)
+SELECT
+  current_setting('ssl_min_protocol_version', true) AS ssl_min_protocol_version,
+  COALESCE(NULLIF(current_setting('ssl_max_protocol_version', true), ''),
+           'no explicit maximum') AS ssl_max_protocol_version,
+  COUNT(*) FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin')
+                   AS candidate_client_connections,
+  COUNT(*) FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin'
+                   AND ssl IS TRUE AND version = 'TLSv1.3')
+                   AS tls13_connections,
+  COUNT(*) FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin'
+                   AND ssl IS TRUE
+                   AND version IN ('TLSv1', 'TLSv1.1', 'TLSv1.2'))
+                   AS tls12_or_older_connections,
+  COUNT(*) FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin'
+                   AND ssl IS FALSE) AS non_tls_connections,
+  COUNT(*) FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin'
+                   AND (ssl IS NULL OR (ssl IS TRUE AND version IS NULL)))
+                   AS unknown_tls_details,
+  COUNT(*) FILTER (WHERE usename = 'rdsproxyadmin')
+                   AS rds_proxy_backend_connections,
+  COALESCE(
+    string_agg(DISTINCT
+      CASE
+        WHEN ssl IS NULL OR (ssl IS TRUE AND version IS NULL) THEN 'unknown'
+        WHEN ssl IS FALSE THEN 'non-TLS'
+        ELSE version
+      END, ', ') FILTER (WHERE COALESCE(usename, '') <> 'rdsproxyadmin'),
+    'none'
+  ) AS observed_protocols
+FROM client_sessions;"
+
 sleep 1
 echo "still working ..."
 echo "20% done ..."
@@ -293,7 +374,7 @@ echo "<body style="font-family:'Verdana'" bgcolor="#F8F8F8">" >> $html
 echo "<fieldset>" >> $html
 echo "<table><tr> <td width="20"></td> <td>" >>$html
 echo "<h1><font face="verdana" color="#0099cc"><center><u>PostgreSQL Pre-upgrade Check Report For $COMNAME</u></center></font></h1></color>" >> $html
-echo "<font face="verdana" color="#808080"><small>Author: Vivek Singh, Principal Database Specialist - PostgreSQL, Amazon Web Services | Version V05</small></font>" >> $html
+echo "<font face="verdana" color="#808080"><small>Author: Vivek Singh, Principal Database Specialist - PostgreSQL, Amazon Web Services | Version V06</small></font>" >> $html
 echo "</fieldset>" >> $html
 echo "<br>" >> $html
 echo "<br>" >> $html
@@ -569,7 +650,7 @@ if [ $DBTYPE  ==  aurora-postgresql ] && [ $RRCNT -ne 0 ]
 then
 echo "<font face="verdana" color="red">For Aurora, after the writer upgrade completes, each reader instance experiences a brief outage while it's upgraded to the new major, adding up overall outage. $RRCNT readers found for this Aurora cluster. For reducing outage, please drop below readers.</font>" >>$html
 echo "<br>" >> $html
-aws rds describe-db-clusters --db-cluster-identifier $CLUSNAME --region $REGNAME --query "DBClusters[*].DBClusterMembers[*].[DBInstanceIdentifier]"  --output text | head -n -1 >>$html
+aws rds describe-db-clusters --db-cluster-identifier $CLUSNAME --region $REGNAME --query "DBClusters[*].DBClusterMembers[*].[DBInstanceIdentifier]"  --output text | sed '$d' >>$html
 fi
 
 echo "<br>" >> $html
@@ -764,8 +845,8 @@ for CHECKDB in $DB_LIST
 do
   # Build per-database psql command
   case $AUTH_CHOICE in
-    1) DBPSQLCL="psql -h $EP -p $RDSPORT -U $MASTERUSER -d $CHECKDB" ;;
-    2) DBPSQLCL="psql \"host=$EP port=$RDSPORT dbname=$CHECKDB user=$MASTERUSER password=$TOKEN sslmode=verify-full sslrootcert=$REGNAME-bundle.pem\"" ;;
+    1) DBPSQLCL="psql -h $DB_PSQL_HOST -p $DB_CONNECT_PORT -U $MASTERUSER -d $CHECKDB" ;;
+    2) DBPSQLCL="psql -h $DB_PSQL_HOST -p $DB_CONNECT_PORT -U $MASTERUSER -d $CHECKDB" ;;
   esac
 
   echo "<font face="verdana" color="#0099cc"><b>Database: $CHECKDB</b></font>" >>$html
@@ -942,8 +1023,92 @@ then
   echo "<br>" >> $html
 fi
 
+# --- Upgrading TO 19+ : TLS 1.3 client readiness ---
+if [ "$MAJOR_TO" -ge "19" ]
+then
+  echo "<font face=\"verdana\" color=\"#ff6600\">&nbsp;&nbsp;18d-v. PostgreSQL 19 TLS client readiness: </font>" >>$html
+  echo "<br>" >> $html
+
+  TLS_RESULT=`$PSQLCL -X -t -A -F '|' -c "$SQL19" 2>/dev/null`
+  TLS_QUERY_STATUS=$?
+
+  if [ "$TLS_QUERY_STATUS" -ne "0" ] || [ -z "$TLS_RESULT" ]
+  then
+    echo "<font face=\"verdana\" color=\"orange\"><b>INCONCLUSIVE (non-blocking):</b> TLS readiness evidence could not be collected from pg_stat_ssl and pg_stat_activity. Confirm that the database role has pg_monitor or equivalent statistics visibility, then repeat this check on production during representative traffic well before the upgrade window.</font>" >> $html
+  else
+    IFS='|' read -r TLS_MIN TLS_MAX TLS_CLIENT_COUNT TLS13_COUNT TLS12_OR_OLDER_COUNT NON_TLS_COUNT UNKNOWN_TLS_COUNT RDS_PROXY_COUNT TLS_PROTOCOLS <<< "$TLS_RESULT"
+
+    if ! [[ "$TLS_CLIENT_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$TLS13_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$TLS12_OR_OLDER_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$NON_TLS_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$UNKNOWN_TLS_COUNT" =~ ^[0-9]+$ ]] || ! [[ "$RDS_PROXY_COUNT" =~ ^[0-9]+$ ]]
+    then
+      echo "<font face=\"verdana\" color=\"orange\"><b>INCONCLUSIVE (non-blocking):</b> TLS readiness evidence returned an unexpected format. Repeat the check and review pg_stat_ssl manually before planning the upgrade.</font>" >> $html
+    else
+      TLS_WARNINGS=""
+      case "$TLS_MIN" in
+        "")
+          TLS_WARNINGS="${TLS_WARNINGS}The effective ssl_min_protocol_version was not visible. "
+          ;;
+        TLSv1|TLSv1.1)
+          TLS_WARNINGS="${TLS_WARNINGS}The effective ssl_min_protocol_version (${TLS_MIN}) permits protocols older than TLS 1.2. "
+          ;;
+      esac
+      case "$TLS_MAX" in
+        TLSv1|TLSv1.1|TLSv1.2)
+          TLS_WARNINGS="${TLS_WARNINGS}The effective ssl_max_protocol_version (${TLS_MAX}) prevents TLS 1.3 negotiation. "
+          ;;
+      esac
+
+      TLS_PROXY_CONTEXT=""
+      if [ "$RDS_PROXY_COUNT" -gt "0" ]
+      then
+        TLS_PROXY_CONTEXT="${RDS_PROXY_COUNT} AWS-managed RDS Proxy database-facing backend connection(s) were observed separately; pg_stat_ssl cannot validate the original client-to-proxy TLS leg. "
+      fi
+
+      if [ "$TLS_CLIENT_COUNT" -eq "0" ]
+      then
+        if [ -n "$TLS_WARNINGS" ]
+        then
+          echo "<font face=\"verdana\" color=\"orange\"><b>WARNING (non-blocking):</b> ${TLS_WARNINGS}${TLS_PROXY_CONTEXT}No candidate application or direct client connections were visible, so client compatibility is inconclusive. Correct restrictive server settings as appropriate and repeat the connection snapshot on production during representative traffic.</font>" >> $html
+        elif [ "$RDS_PROXY_COUNT" -gt "0" ]
+        then
+          echo "<font face=\"verdana\" color=\"orange\"><b>INCONCLUSIVE (non-blocking):</b> ${TLS_PROXY_CONTEXT}No candidate application or direct client connections were visible. Validate TLS compatibility at the RDS Proxy endpoint and repeat this database-side check with representative direct clients if applicable.</font>" >> $html
+        else
+          echo "<font face=\"verdana\" color=\"orange\"><b>INCONCLUSIVE (non-blocking):</b> No candidate application or direct client connections were visible when the snapshot was taken. An idle clone or test cluster does not prove that production clients support TLS 1.3. Run this check on production during representative traffic, well before the upgrade window.</font>" >> $html
+        fi
+      else
+        if [ "$TLS12_OR_OLDER_COUNT" -gt "0" ]
+        then
+          TLS_WARNINGS="${TLS_WARNINGS}${TLS12_OR_OLDER_COUNT} candidate client connection(s) negotiated TLS 1.2 or older. "
+        fi
+        if [ "$NON_TLS_COUNT" -gt "0" ]
+        then
+          TLS_WARNINGS="${TLS_WARNINGS}${NON_TLS_COUNT} candidate client connection(s) were not using TLS. "
+        fi
+        if [ "$UNKNOWN_TLS_COUNT" -gt "0" ]
+        then
+          TLS_WARNINGS="${TLS_WARNINGS}TLS details were unavailable for ${UNKNOWN_TLS_COUNT} candidate connection(s), so their compatibility is inconclusive; verify pg_monitor or equivalent statistics visibility. "
+        fi
+
+        if [ -n "$TLS_WARNINGS" ]
+        then
+          echo "<font face=\"verdana\" color=\"orange\"><b>WARNING (non-blocking):</b> ${TLS_WARNINGS}${TLS_PROXY_CONTEXT}The planned PostgreSQL 19 default for ssl_min_protocol_version is TLSv1.3 for both RDS for PostgreSQL and Aurora PostgreSQL. TLS handshakes from clients that cannot negotiate TLS 1.3 will fail unless the target parameter group explicitly allows TLSv1.2. Acceptance of non-TLS connections is separate from ssl_min_protocol_version and depends on the applicable service and connection policy. Validate and upgrade affected drivers or poolers; use a TLSv1.2 minimum only as an explicitly reviewed compatibility measure.</font>" >> $html
+        else
+          echo "<font face=\"verdana\" color=\"green\"><b>No incompatible clients observed:</b> All ${TLS_CLIENT_COUNT} candidate client connection(s) visible in this snapshot negotiated TLS 1.3. ${TLS_PROXY_CONTEXT}This is point-in-time evidence, not a guarantee that every production client is compatible.</font>" >> $html
+        fi
+      fi
+
+      echo "<br>" >> $html
+      echo "<table border=\"1\"><tr><th>Effective ssl_min_protocol_version</th><th>Effective ssl_max_protocol_version</th><th>Candidate client connections</th><th>TLS 1.3</th><th>TLS 1.2 or older</th><th>Non-TLS</th><th>TLS details unavailable</th><th>RDS Proxy backends</th><th>Observed candidate protocols</th></tr><tr><td>${TLS_MIN}</td><td>${TLS_MAX}</td><td>${TLS_CLIENT_COUNT}</td><td>${TLS13_COUNT}</td><td>${TLS12_OR_OLDER_COUNT}</td><td>${NON_TLS_COUNT}</td><td>${UNKNOWN_TLS_COUNT}</td><td>${RDS_PROXY_COUNT}</td><td>${TLS_PROTOCOLS}</td></tr></table>" >> $html
+    fi
+  fi
+
+  echo "<br>" >> $html
+  echo "<font face=\"verdana\" color=\"#808080\"><small>Scope limitation: pg_stat_ssl is a point-in-time, server-side snapshot for the connected PostgreSQL instance. For Aurora, it does not include connections served by other reader or writer instances; assess every client-serving instance or endpoint separately. Candidate client connections can include applications, people, monitoring, maintenance jobs, and direct pooler connections. AWS-managed rdsproxyadmin database-facing backends are counted separately and do not trigger non-TLS client warnings because they do not prove compatibility of the original client-to-proxy leg. Clone or test results are meaningful only when representative clients or approved workload traffic are connected.</small></font>" >> $html
+  echo "<br>" >> $html
+  echo "<br>" >> $html
+fi
+
 # --- Upgrading any version: Check random_page_cost and effective_io_concurrency (Aurora recommendations) ---
-echo "<font face="verdana" color="#ff6600">&nbsp;&nbsp;18d-v. Parameter review opportunity (post-upgrade best practice): </font>" >>$html
+echo "<font face="verdana" color="#ff6600">&nbsp;&nbsp;18d-vi. Parameter review opportunity (post-upgrade best practice): </font>" >>$html
 echo "<br>" >> $html
 RPC=`$PSQLCL -c "SHOW random_page_cost;" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g'`
 EIC=`$PSQLCL -c "SHOW effective_io_concurrency;" | awk 'c&&!--c;/----/{c=1}'|sed 's/ //g'`
@@ -1010,7 +1175,7 @@ echo "<br>" >> $html
 echo "<font face="verdana" color="#0099cc"><small>Note: While modifying any database configuration, parameters, please consult/review with your DBA/DB expert. Results may vary depending on the workloads and expectations. Also, before applying modifications, learn about them at <a href="https://www.postgresql.org/docs/current/pgstatstatements.html" target="_blank">PostgreSQL official docs</a>. Before making any changes in production, its recommended to test those in testing environment thoroughly. If you have any feedback about this tool, please provide it to your AWS representative.<small></font>" >> $html
 
 echo "<br>" >> $html
-echo "<font face="verdana" color="#d3d3d3"><small>End of report. Script version V05</small></font>" >> $html
+echo "<font face="verdana" color="#d3d3d3"><small>End of report. Script version V06</small></font>" >> $html
 echo "<br>" >> $html
 echo "<br>" >> $html
 
